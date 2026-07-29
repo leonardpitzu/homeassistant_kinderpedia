@@ -61,6 +61,9 @@ class KinderpediaHistoryStore:
         )
         # {monday_iso_str: {weekday_name: day_entry, ...}}
         self._weeks: dict[str, dict] = {}
+        # Flattened {date_iso: day_entry} cache; rebuilt lazily, invalidated
+        # whenever the underlying week data changes.
+        self._all_days_cache: dict[str, dict] | None = None
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -72,10 +75,12 @@ class KinderpediaHistoryStore:
         stored = await self._store.async_load()
         if isinstance(stored, dict):
             self._weeks = stored.get("weeks", {})
+        self._all_days_cache = None
         self._loaded = True
 
     async def async_save(self) -> None:
         """Persist current data to disk."""
+        self._all_days_cache = None
         await self._store.async_save({"weeks": self._weeks})
 
     # ------------------------------------------------------------------
@@ -91,14 +96,19 @@ class KinderpediaHistoryStore:
         """Return *all* historical days, keyed by ``date_iso`` string.
 
         This flattens the week structure so the coordinator can merge
-        history with the live current-week data.
+        history with the live current-week data.  The result is cached and
+        only recomputed after the underlying weeks change.
         """
+        if self._all_days_cache is not None:
+            return self._all_days_cache
+
         result: dict[str, dict] = {}
         for _monday, week_days in self._weeks.items():
             for _weekday, day_entry in week_days.items():
                 d = day_entry.get("date")
                 if d:
                     result[d] = day_entry
+        self._all_days_cache = result
         return result
 
     def has_week(self, monday_iso: str) -> bool:

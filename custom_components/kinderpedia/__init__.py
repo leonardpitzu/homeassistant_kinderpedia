@@ -40,7 +40,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         await store.async_load()
         history_stores[key] = store
 
-    coordinator = KinderpediaDataUpdateCoordinator(hass, api, history_stores)
+    coordinator = KinderpediaDataUpdateCoordinator(
+        hass, api, history_stores, initial_children=children
+    )
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = {
