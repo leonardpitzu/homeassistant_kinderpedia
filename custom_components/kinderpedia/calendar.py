@@ -75,6 +75,12 @@ class KinderpediaCalendar(CoordinatorEntity, CalendarEntity):
             "name": device_name,
             "manufacturer": "Kinderpedia",
         }
+        # Event list is rebuilt only when the coordinator data changes.
+        self._events_cache: list[CalendarEvent] | None = None
+        self._events_token: str | None = None
+        # Latest-day lookup also depends on the current date.
+        self._latest_day_cache: dict | None = None
+        self._latest_day_token: tuple[str | None, str] | None = None
 
     # ------------------------------------------------------------------
     # CalendarEntity interface
@@ -146,27 +152,37 @@ class KinderpediaCalendar(CoordinatorEntity, CalendarEntity):
         """Return the most recent day-info with real activity.
 
         Prefers today if available, otherwise falls back to the latest
-        past day that has a valid checkin or meal data.
+        past day that has a valid checkin or meal data.  Cached per
+        coordinator update and per calendar day.
         """
         data = self.coordinator.data or {}
+        today_str = date.today().isoformat()
+        token = (data.get("last_updated"), today_str)
+        if self._latest_day_token == token:
+            return self._latest_day_cache
+
         child_data = data.get("children", {}).get(self._key, {})
         days = child_data.get("days", {})
-        today_str = date.today().isoformat()
 
         # Prefer today
+        result: dict | None = None
         for day_info in days.values():
             if day_info.get("date") == today_str and self._has_activity(day_info):
-                return day_info
+                result = day_info
+                break
 
         # Fall back to the most recent day with activity
-        best: dict | None = None
-        best_date = ""
-        for day_info in days.values():
-            d = day_info.get("date", "")
-            if d and d != "unknown" and d <= today_str and self._has_activity(day_info) and d > best_date:
-                best_date = d
-                best = day_info
-        return best
+        if result is None:
+            best_date = ""
+            for day_info in days.values():
+                d = day_info.get("date", "")
+                if d and d != "unknown" and d <= today_str and self._has_activity(day_info) and d > best_date:
+                    best_date = d
+                    result = day_info
+
+        self._latest_day_token = token
+        self._latest_day_cache = result
+        return result
 
     @staticmethod
     def _has_activity(day_info: dict) -> bool:
@@ -177,8 +193,15 @@ class KinderpediaCalendar(CoordinatorEntity, CalendarEntity):
         return any(day_info.get(f"{meal}_items") for meal in ("breakfast", "lunch", "snack"))
 
     def _build_events(self) -> list[CalendarEvent]:
-        """Build calendar events from coordinator day data."""
+        """Build calendar events from coordinator day data.
+
+        Cached and only rebuilt when the coordinator data changes.
+        """
         data = self.coordinator.data or {}
+        token = data.get("last_updated")
+        if self._events_token == token and self._events_cache is not None:
+            return self._events_cache
+
         child_data = data.get("children", {}).get(self._key, {})
         days = child_data.get("days", {})
 
@@ -267,6 +290,8 @@ class KinderpediaCalendar(CoordinatorEntity, CalendarEntity):
                 )
             )
 
+        self._events_token = token
+        self._events_cache = events
         return events
 
     @staticmethod

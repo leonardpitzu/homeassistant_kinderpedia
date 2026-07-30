@@ -1,4 +1,5 @@
 import logging
+from asyncio import Lock
 from datetime import UTC, datetime
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.exceptions import HomeAssistantError
@@ -23,12 +24,23 @@ class KinderpediaAPI:
         self.session = async_get_clientsession(hass)
         self.token = None
         self.token_expiry = datetime.min.replace(tzinfo=UTC)
+        self._login_lock = Lock()
 
     async def login(self):
         if self.token and datetime.now(tz=UTC) < self.token_expiry:
             _LOGGER.debug("Reusing cached token")
             return
 
+        async with self._login_lock:
+            # Re-check after acquiring the lock: another coroutine may have
+            # refreshed the token while we were waiting.
+            if self.token and datetime.now(tz=UTC) < self.token_expiry:
+                _LOGGER.debug("Reusing cached token")
+                return
+
+            await self._do_login()
+
+    async def _do_login(self):
         payload = {
             "email": self.email,
             "password": self.password,

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import date as date_cls, timedelta
@@ -188,10 +189,14 @@ class KinderpediaDataUpdateCoordinator(DataUpdateCoordinator):
         hass: HomeAssistant,
         api: KinderpediaAPI,
         history_stores: dict | None = None,
+        initial_children: list | None = None,
     ) -> None:
         self.api = api
         # {child_key: KinderpediaHistoryStore}
         self._history_stores: dict = history_stores or {}
+        # Children already fetched during setup; consumed on the first refresh
+        # to avoid a duplicate fetch_children round-trip at startup.
+        self._initial_children: list | None = initial_children
         super().__init__(
             hass,
             _LOGGER,
@@ -203,49 +208,67 @@ class KinderpediaDataUpdateCoordinator(DataUpdateCoordinator):
         """Fetch all children and their timelines, return parsed data."""
         _LOGGER.debug("Fetching data from Kinderpedia API")
         try:
-            children = await self.api.fetch_children()
+            # Reuse children fetched during setup on the very first refresh;
+            # every subsequent refresh re-fetches to pick up new enrolments.
+            if self._initial_children is not None:
+                children = self._initial_children
+                self._initial_children = None
+            else:
+                children = await self.api.fetch_children()
+
             result = {
                 "children": {},
                 "last_updated": utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
-            for child in children:
-                child_id = child["child_id"]
-                kg_id = child["kindergarten_id"]
-                key = f"{child_id}_{kg_id}"
-
-                timeline_raw = await self.api.fetch_timeline(child_id, kg_id)
-                _LOGGER.debug("Kinderpedia: Raw timeline for %s: %s", key, timeline_raw)
-                parsed_days = _parse_timeline(timeline_raw)
-
-                newsfeed_raw = await self.api.fetch_newsfeed(child_id, kg_id)
-                _LOGGER.debug("Kinderpedia: Raw newsfeed for %s: %s", key, newsfeed_raw)
-                parsed_feed = _parse_newsfeed(newsfeed_raw)
-
-                result["children"][key] = {
-                    "child": child,
-                    "days": parsed_days,
-                    "newsfeed": parsed_feed,
-                }
-
-                # Merge historical weeks underneath current-week data.
-                # Historical days use their date string as key; current-week
-                # days use weekday names.  We store all days keyed by date so
-                # the calendar can iterate uniformly.
-                history_store = self._history_stores.get(key)
-                if history_store is not None:
-                    historical_days = history_store.get_all_days()
-                    # Current week takes precedence – never overwrite live data
-                    current_dates = {
-                        d.get("date") for d in parsed_days.values() if d.get("date")
-                    }
-                    for date_iso, day_entry in historical_days.items():
-                        if date_iso not in current_dates:
-                            # Use date_iso as key to avoid weekday name collisions
-                            result["children"][key]["days"][date_iso] = day_entry
+            # Fetch every child's timeline + newsfeed concurrently.
+            child_results = await asyncio.gather(
+                *(self._fetch_child(child) for child in children)
+            )
+            for key, entry in child_results:
+                result["children"][key] = entry
 
             _LOGGER.debug("Kinderpedia data successfully fetched for %d children", len(children))
             return result
         except Exception as err:
             _LOGGER.error("Failed to fetch Kinderpedia data: %s", err)
             raise UpdateFailed(f"Error fetching data: {err}") from err
+
+    async def _fetch_child(self, child):
+        """Fetch and parse one child's timeline + newsfeed concurrently."""
+        child_id = child["child_id"]
+        kg_id = child["kindergarten_id"]
+        key = f"{child_id}_{kg_id}"
+
+        timeline_raw, newsfeed_raw = await asyncio.gather(
+            self.api.fetch_timeline(child_id, kg_id),
+            self.api.fetch_newsfeed(child_id, kg_id),
+        )
+        _LOGGER.debug("Kinderpedia: Raw timeline for %s: %s", key, timeline_raw)
+        _LOGGER.debug("Kinderpedia: Raw newsfeed for %s: %s", key, newsfeed_raw)
+
+        parsed_days = _parse_timeline(timeline_raw)
+        parsed_feed = _parse_newsfeed(newsfeed_raw)
+
+        entry = {
+            "child": child,
+            "days": parsed_days,
+            "newsfeed": parsed_feed,
+        }
+
+        # Merge historical weeks underneath current-week data.  Historical days
+        # use their date string as key; current-week days use weekday names.
+        # All days end up keyed by date so the calendar can iterate uniformly.
+        history_store = self._history_stores.get(key)
+        if history_store is not None:
+            historical_days = history_store.get_all_days()
+            # Current week takes precedence – never overwrite live data
+            current_dates = {
+                d.get("date") for d in parsed_days.values() if d.get("date")
+            }
+            for date_iso, day_entry in historical_days.items():
+                if date_iso not in current_dates:
+                    # Use date_iso as key to avoid weekday name collisions
+                    parsed_days[date_iso] = day_entry
+
+        return key, entry
