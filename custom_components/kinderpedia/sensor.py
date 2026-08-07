@@ -1,199 +1,168 @@
-import logging
+"""Sensor platform for Kinderpedia."""
+
+from __future__ import annotations
+
+from typing import Any
+
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.core import callback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .const import DOMAIN
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-_LOGGER = logging.getLogger(__name__)
+from .const import DOMAIN, SCHOOL_WEEKDAYS
+from .coordinator import KinderpediaConfigEntry, KinderpediaDataUpdateCoordinator
+from .entity import KinderpediaChildEntity
+
+# (unique-id slug, day-entry field)
+_WEEK_SENSORS: tuple[tuple[str, str], ...] = (
+    ("breakfast_week", "breakfast_percent"),
+    ("lunch_week", "lunch_percent"),
+    ("nap_week", "nap_duration"),
+)
 
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
-    entry_data = hass.data[DOMAIN][config_entry.entry_id]
-    coordinator = entry_data["coordinator"]
-
-    tracked_keys = set()
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: KinderpediaConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up Kinderpedia sensors, including children discovered later."""
+    coordinator = config_entry.runtime_data.coordinator
+    tracked_keys: set[str] = set()
 
     @callback
-    def _discover_new_children():
-        """Create sensors for newly discovered children."""
+    def _discover_new_children() -> None:
         data = coordinator.data or {}
-        children_data = data.get("children", {})
-        new_sensors = []
+        new_sensors: list[SensorEntity] = []
 
-        for key, child_data in children_data.items():
+        for key, child_data in data.get("children", {}).items():
             if key in tracked_keys:
                 continue
             tracked_keys.add(key)
 
             child = child_data["child"]
-            child_id = child["child_id"]
-            kg_id = child["kindergarten_id"]
-            device_name = f"{child['first_name']} {child['last_name']}"
-            first_name = child["first_name"]
-
-            new_sensors.append(KinderpediaChildInfoSensor(
-                coordinator, child_id, kg_id, device_name, first_name
-            ))
-            new_sensors.append(KinderpediaBreakfastWeekSensor(
-                coordinator, child_id, kg_id, device_name, first_name
-            ))
-            new_sensors.append(KinderpediaLunchWeekSensor(
-                coordinator, child_id, kg_id, device_name, first_name
-            ))
-            new_sensors.append(KinderpediaNapWeekSensor(
-                coordinator, child_id, kg_id, device_name, first_name
-            ))
-            new_sensors.append(KinderpediaNewsfeedSensor(
-                coordinator, child_id, kg_id, device_name, first_name
-            ))
+            args = (
+                coordinator,
+                child["child_id"],
+                child["kindergarten_id"],
+                f"{child['first_name']} {child['last_name']}".strip(),
+                child["first_name"],
+            )
+            new_sensors.append(KinderpediaChildInfoSensor(*args))
+            new_sensors.extend(
+                KinderpediaWeekSensor(*args, sensor_type=slug, field=field)
+                for slug, field in _WEEK_SENSORS
+            )
+            new_sensors.append(KinderpediaNewsfeedSensor(*args))
 
         if new_sensors:
             async_add_entities(new_sensors)
 
     _discover_new_children()
-    config_entry.async_on_unload(
-        coordinator.async_add_listener(_discover_new_children)
-    )
+    config_entry.async_on_unload(coordinator.async_add_listener(_discover_new_children))
 
-class KinderpediaChildInfoSensor(CoordinatorEntity, SensorEntity):
-    def __init__(self, coordinator, child_id, kg_id, device_name, first_name):
-        super().__init__(coordinator)
-        self._key = f"{child_id}_{kg_id}"
+
+class KinderpediaChildInfoSensor(KinderpediaChildEntity, SensorEntity):
+    """Static information about the child."""
+
+    def __init__(
+        self,
+        coordinator: KinderpediaDataUpdateCoordinator,
+        child_id: int,
+        kg_id: int,
+        device_name: str,
+        first_name: str,
+    ) -> None:
+        super().__init__(coordinator, child_id, kg_id, device_name)
         self._attr_unique_id = f"{DOMAIN}_child_info_{child_id}_{kg_id}"
-        self._attr_name = f"{first_name.lower()}"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, f"{child_id}_{kg_id}")},
-            "name": device_name,
-            "manufacturer": "Kinderpedia",
-        }
+        self._attr_name = first_name.lower()
 
     @property
-    def native_value(self):
-        child_data = self._get_child_data()
-        if child_data:
-            child = child_data["child"]
-            return f"{child.get('first_name', '')} {child.get('last_name', '')}".strip()
-        return None
+    def native_value(self) -> str | None:
+        child = self._child_data.get("child")
+        if not child:
+            return None
+        return f"{child.get('first_name', '')} {child.get('last_name', '')}".strip()
 
     @property
-    def extra_state_attributes(self):
-        child_data = self._get_child_data()
-        if not child_data:
+    def extra_state_attributes(self) -> dict[str, Any]:
+        child = self._child_data.get("child")
+        if not child:
             return {}
-        child = child_data["child"]
-        data = self.coordinator.data or {}
         return {
             "birth_date": child.get("birth_date"),
             "gender": "female" if child.get("gender") == "f" else "male",
             "kindergarten": child.get("kindergarten_name"),
-            "last_updated": data.get("last_updated"),
+            "last_updated": self._last_updated,
         }
 
-    def _get_child_data(self):
-        data = self.coordinator.data or {}
-        return data.get("children", {}).get(self._key)
 
+class KinderpediaWeekSensor(KinderpediaChildEntity, SensorEntity):
+    """Weekly aggregate of a single day metric, Mon-Fri as attributes."""
 
-class _KinderpediaWeekSensorBase(CoordinatorEntity, SensorEntity):
-    """Base class for weekly aggregate sensors."""
-
-    _attr_field: str = ""  # override in subclass
-
-    def __init__(self, coordinator, child_id, kg_id, device_name, first_name, sensor_type):
-        super().__init__(coordinator)
-        self._key = f"{child_id}_{kg_id}"
+    def __init__(
+        self,
+        coordinator: KinderpediaDataUpdateCoordinator,
+        child_id: int,
+        kg_id: int,
+        device_name: str,
+        first_name: str,
+        *,
+        sensor_type: str,
+        field: str,
+    ) -> None:
+        super().__init__(coordinator, child_id, kg_id, device_name)
+        self._field = field
         self._attr_unique_id = f"{DOMAIN}_{sensor_type}_{child_id}_{kg_id}"
         self._attr_name = f"{first_name.lower()} {sensor_type.replace('_', ' ')}"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, f"{child_id}_{kg_id}")},
-            "name": device_name,
-            "manufacturer": "Kinderpedia",
-        }
 
     @property
-    def native_value(self):
-        data = self.coordinator.data or {}
-        return data.get("last_updated", "")[:10]  # date portion
+    def native_value(self) -> str:
+        return (self._last_updated or "")[:10]  # date portion
 
     @property
-    def extra_state_attributes(self):
-        data = self.coordinator.data or {}
-        child_data = data.get("children", {}).get(self._key, {})
-        days = child_data.get("days", {})
-        attrs = {
-            "last_updated": data.get("last_updated"),
-        }
-        for weekday in ["monday", "tuesday", "wednesday", "thursday", "friday"]:
-            attrs[weekday] = days.get(weekday, {}).get(self._attr_field, 0)
+    def extra_state_attributes(self) -> dict[str, Any]:
+        week = self._week_days()
+        attrs: dict[str, Any] = {"last_updated": self._last_updated}
+        for weekday in SCHOOL_WEEKDAYS:
+            attrs[weekday] = week.get(weekday, {}).get(self._field, 0)
         return attrs
 
 
-class KinderpediaBreakfastWeekSensor(_KinderpediaWeekSensorBase):
-    _attr_field = "breakfast_percent"
-
-    def __init__(self, coordinator, child_id, kg_id, device_name, first_name):
-        super().__init__(coordinator, child_id, kg_id, device_name, first_name, "breakfast_week")
-
-
-class KinderpediaLunchWeekSensor(_KinderpediaWeekSensorBase):
-    _attr_field = "lunch_percent"
-
-    def __init__(self, coordinator, child_id, kg_id, device_name, first_name):
-        super().__init__(coordinator, child_id, kg_id, device_name, first_name, "lunch_week")
-
-
-class KinderpediaNapWeekSensor(_KinderpediaWeekSensorBase):
-    _attr_field = "nap_duration"
-
-    def __init__(self, coordinator, child_id, kg_id, device_name, first_name):
-        super().__init__(coordinator, child_id, kg_id, device_name, first_name, "nap_week")
-
-
-class KinderpediaNewsfeedSensor(CoordinatorEntity, SensorEntity):
-    """Sensor showing the latest newsfeed activity for a child."""
+class KinderpediaNewsfeedSensor(KinderpediaChildEntity, SensorEntity):
+    """Latest newsfeed activity for a child."""
 
     _attr_icon = "mdi:newspaper-variant-outline"
 
-    def __init__(self, coordinator, child_id, kg_id, device_name, first_name):
-        super().__init__(coordinator)
-        self._key = f"{child_id}_{kg_id}"
+    def __init__(
+        self,
+        coordinator: KinderpediaDataUpdateCoordinator,
+        child_id: int,
+        kg_id: int,
+        device_name: str,
+        first_name: str,
+    ) -> None:
+        super().__init__(coordinator, child_id, kg_id, device_name)
         self._attr_unique_id = f"{DOMAIN}_newsfeed_{child_id}_{kg_id}"
         self._attr_name = f"{first_name.lower()} newsfeed"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, f"{child_id}_{kg_id}")},
-            "name": device_name,
-            "manufacturer": "Kinderpedia",
-        }
 
-    def _get_feed(self):
-        data = self.coordinator.data or {}
-        child_data = data.get("children", {}).get(self._key, {})
-        return child_data.get("newsfeed", [])
+    def _feed(self) -> list[dict]:
+        return self._child_data.get("newsfeed", [])
 
     @property
-    def native_value(self):
-        feed = self._get_feed()
-        if feed:
-            return feed[0].get("summary", "")[:255]
-        return None
+    def native_value(self) -> str | None:
+        feed = self._feed()
+        return feed[0].get("summary", "")[:255] if feed else None
 
     @property
-    def extra_state_attributes(self):
-        feed = self._get_feed()
-        data = self.coordinator.data or {}
-        attrs = {
-            "last_updated": data.get("last_updated"),
-        }
-        if feed:
-            latest = feed[0]
-            attrs["latest_date"] = latest.get("date")
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = {"last_updated": self._last_updated}
+        feed = self._feed()
+        if not feed:
+            return attrs
 
-            # Recent items as a single formatted string with separators
-            separator = "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            entries = []
-            for item in feed[:10]:
-                date = item.get("date", "")
-                summary = item.get("summary", "")
-                entries.append(f"📅 {date}\n{summary}")
-            attrs["recent"] = separator.join(entries)
+        attrs["latest_date"] = feed[0].get("date")
+        separator = "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        attrs["recent"] = separator.join(
+            f"📅 {item.get('date', '')}\n{item.get('summary', '')}" for item in feed[:10]
+        )
         return attrs

@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
-from aiohttp import ClientSession
+from aiohttp import ClientError, ClientSession
 
 from custom_components.kinderpedia.api import (
     KinderpediaAPI,
@@ -62,7 +62,9 @@ class TestLogin:
         hass = MagicMock()
         api, session = _make_api(hass)
 
-        session.post = MagicMock(return_value=_async_ctx_raise(Exception("DNS fail")))
+        session.post = MagicMock(
+            return_value=_async_ctx_raise(ClientError("DNS fail"))
+        )
 
         with pytest.raises(KinderpediaConnectionError):
             await api.login()
@@ -205,6 +207,35 @@ class TestFetchNewsfeed:
 
         with pytest.raises(KinderpediaConnectionError):
             await api.fetch_newsfeed(111, 222)
+
+
+class TestTokenRejection:
+    """The server may drop a token before its advertised expiry."""
+
+    @pytest.mark.asyncio
+    async def test_retries_once_after_401(self):
+        hass = MagicMock()
+        api, session = _make_api(hass)
+
+        session.post = MagicMock(return_value=_async_ctx(_make_response(200, MOCK_LOGIN_RESPONSE)))
+        responses = [_make_response(401, {}), _make_response(200, MOCK_TIMELINE_RAW)]
+        session.get = MagicMock(side_effect=lambda *a, **kw: _async_ctx(responses.pop(0)))
+
+        result = await api.fetch_timeline(111, 222)
+
+        assert "result" in result
+        assert session.post.call_count == 2  # initial login + refresh
+
+    @pytest.mark.asyncio
+    async def test_gives_up_after_second_401(self):
+        hass = MagicMock()
+        api, session = _make_api(hass)
+
+        session.post = MagicMock(return_value=_async_ctx(_make_response(200, MOCK_LOGIN_RESPONSE)))
+        session.get = MagicMock(return_value=_async_ctx(_make_response(403, {})))
+
+        with pytest.raises(KinderpediaAuthError):
+            await api.fetch_timeline(111, 222)
 
 
 # --- Helpers for async context managers ---

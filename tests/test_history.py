@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from custom_components.kinderpedia.api import KinderpediaConnectionError
 from custom_components.kinderpedia.coordinator import _parse_timeline
 from custom_components.kinderpedia.history import (
     KinderpediaHistoryStore,
@@ -216,7 +217,8 @@ class TestBackfill:
         assert count == 2
         assert store.has_week("2026-02-16")
         assert store.has_week("2026-02-09")
-        assert store._store.async_save.call_count == 2
+        # The whole walk is persisted with a single write.
+        assert store._store.async_save.call_count == 1
 
     @pytest.mark.asyncio
     async def test_backfill_stops_at_existing_week(self):
@@ -283,7 +285,7 @@ class TestBackfill:
         store._store.async_save = AsyncMock()
 
         async def mock_fetch(child_id, kg_id, week_offset=0):
-            raise Exception("API down")
+            raise KinderpediaConnectionError("API down")
 
         api = MagicMock()
         api.fetch_timeline = mock_fetch
@@ -371,7 +373,7 @@ class TestArchiveLastWeek:
         store._store.async_save = AsyncMock()
 
         async def mock_fetch(child_id, kg_id, week_offset=0):
-            raise Exception("timeout")
+            raise KinderpediaConnectionError("timeout")
 
         api = MagicMock()
         api.fetch_timeline = mock_fetch

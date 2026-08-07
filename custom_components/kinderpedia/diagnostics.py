@@ -5,25 +5,27 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .coordinator import KinderpediaConfigEntry
 
 TO_REDACT_CONFIG = {CONF_EMAIL, CONF_PASSWORD}
 TO_REDACT_DATA = {"avatar", "first_name", "last_name", "birth_date"}
 
 
 async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: ConfigEntry
+    hass: HomeAssistant, entry: KinderpediaConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    runtime = entry.runtime_data
 
     return {
         "config_entry": async_redact_data(dict(entry.data), TO_REDACT_CONFIG),
-        "coordinator_data": _redact_coordinator_data(coordinator.data),
+        "history_weeks": {
+            key: len(store.weeks) for key, store in runtime.history_stores.items()
+        },
+        "coordinator_data": _redact_coordinator_data(runtime.coordinator.data),
     }
 
 

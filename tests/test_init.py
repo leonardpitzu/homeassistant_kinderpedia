@@ -43,8 +43,9 @@ async def test_setup_entry(hass: HomeAssistant, mock_config_entry):
         await hass.async_block_till_done()
 
     assert mock_config_entry.state == ConfigEntryState.LOADED
-    assert DOMAIN in hass.data
-    assert mock_config_entry.entry_id in hass.data[DOMAIN]
+    assert mock_config_entry.runtime_data.coordinator is coordinator
+    assert "111_222" in mock_config_entry.runtime_data.history_stores
+    assert hass.services.has_service(DOMAIN, "backfill_history")
 
 
 async def test_setup_entry_auth_failure(hass: HomeAssistant, mock_config_entry):
@@ -97,4 +98,4 @@ async def test_unload_entry(hass: HomeAssistant, mock_config_entry):
 
     result = await hass.config_entries.async_unload(mock_config_entry.entry_id)
     assert result is True
-    assert mock_config_entry.entry_id not in hass.data.get(DOMAIN, {})
+    assert not hass.services.has_service(DOMAIN, "backfill_history")

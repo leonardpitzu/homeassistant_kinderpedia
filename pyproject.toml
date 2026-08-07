@@ -1,15 +1,15 @@
 [project]
 name = "kinderpedia"
-version = "1.0.0"
+version = "1.1.0"
 description = "Kinderpedia Home Assistant integration"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
 [tool.ruff]
-target-version = "py314"
+target-version = "py313"
 line-length = 120
 
 [tool.ruff.lint]

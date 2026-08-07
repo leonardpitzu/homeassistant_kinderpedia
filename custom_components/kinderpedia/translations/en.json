@@ -9,15 +9,24 @@
           "email": "Email",
           "password": "Password"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Kinderpedia",
+        "description": "The stored password for {email} is no longer accepted. Enter the current one.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
       "invalid_auth": "Invalid email or password",
       "no_children_found": "No active children found on this account",
-      "cannot_connect": "Unable to connect to Kinderpedia"
+      "cannot_connect": "Unable to connect to Kinderpedia",
+      "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "This Kinderpedia account is already configured"
+      "already_configured": "This Kinderpedia account is already configured",
+      "reauth_successful": "Re-authentication was successful"
     }
   },
   "services": {

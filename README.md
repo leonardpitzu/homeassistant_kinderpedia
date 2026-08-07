@@ -68,8 +68,8 @@ The Kinderpedia API returns one week of timeline data at a time. This integratio
 | **Manual re-sync** | Triggered via the `kinderpedia.backfill_history` service | On demand |
 
 - Past weeks are **immutable** - once stored they are never re-fetched.
-- Data is persisted in Home Assistant's `.storage` directory (one file per child).
-- The initial backfill runs in the background and makes one API request every 5 seconds to avoid overloading the server. For a child enrolled since September 2024, that's roughly 75 weeks - about 6 minutes of quiet background work.
+- Data is persisted in Home Assistant's `.storage` directory (one file per child), keeping the most recent 104 weeks.
+- The initial backfill runs in the background and makes one API request every 5 seconds to avoid overloading the server. For a child enrolled since September 2024, that's roughly 75 weeks - about 6 minutes of quiet background work. The whole walk is written to disk once, at the end.
 - After the initial backfill, the only recurring cost is **one extra API call per week**.
 
 ### Manual backfill service

@@ -4,10 +4,15 @@ from datetime import date, datetime, time
 from unittest.mock import MagicMock
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from custom_components.kinderpedia.coordinator import _parse_timeline
 from custom_components.kinderpedia.calendar import KinderpediaCalendar
 from tests.conftest import MOCK_CHILD, MOCK_TIMELINE_RAW
+
+MONDAY = "2026-02-09"
+WEEK_START = date(2026, 2, 9)
+WEEK_END = date(2026, 2, 15)
 
 
 def _make_coordinator_data():
@@ -26,14 +31,18 @@ def _make_coordinator_data():
 
 def _make_calendar(coordinator) -> KinderpediaCalendar:
     """Create a calendar entity wired to a mock coordinator."""
-    cal = KinderpediaCalendar(
+    return KinderpediaCalendar(
         coordinator,
         child_id=111,
         kg_id=222,
         device_name="Alice Smith",
         first_name="Alice",
     )
-    return cal
+
+
+def _week_events(cal: KinderpediaCalendar):
+    """Build every event of the fixture week."""
+    return cal._build_events(WEEK_START, WEEK_END)
 
 
 # -------------------------------------------------------------------
@@ -46,7 +55,7 @@ async def test_calendar_builds_timed_school_events(hass: HomeAssistant):
     coordinator.data = _make_coordinator_data()
 
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     school_events = [e for e in events if "School" in (e.summary or "")]
     assert len(school_events) >= 1
@@ -71,7 +80,7 @@ async def test_calendar_school_event_has_tz(hass: HomeAssistant):
     coordinator.data = _make_coordinator_data()
 
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     school_events = [e for e in events if "School" in (e.summary or "")]
     for ev in school_events:
@@ -86,7 +95,7 @@ async def test_calendar_nap_event_unchanged(hass: HomeAssistant):
     coordinator.data = _make_coordinator_data()
 
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     nap_events = [e for e in events if e.summary == "Nap"]
     assert len(nap_events) == 1
@@ -104,7 +113,7 @@ async def test_calendar_event_description_has_emoji_meals(hass: HomeAssistant):
     coordinator.data = _make_coordinator_data()
 
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     monday_school = [
         e for e in events
@@ -116,6 +125,7 @@ async def test_calendar_event_description_has_emoji_meals(hass: HomeAssistant):
     assert "🥣" in desc  # breakfast icon
     assert "Breakfast" in desc
     assert "Cereal" in desc
+    assert "<br>" in desc  # meal lines are separated the way the cards expect
     assert "🍽️" in desc  # lunch icon
     assert "Chicken soup" in desc
     assert "🍪" in desc  # snack icon
@@ -136,26 +146,28 @@ async def test_calendar_event_description_has_emoji_meals(hass: HomeAssistant):
 
 async def test_calendar_event_property_returns_today(hass: HomeAssistant, freezer):
     """The .event property returns an event for today if one exists."""
-    # Freeze to a known Tuesday at 10:00 UTC so date.today() and
-    # dt_util.now().date() always agree regardless of CI timezone.
-    freezer.move_to("2026-03-31T10:00:00+00:00")
+    freezer.move_to("2026-02-09T10:00:00+00:00")
 
     coordinator = MagicMock()
-    data = _make_coordinator_data()
+    coordinator.data = _make_coordinator_data()
 
-    today_str = date.today().isoformat()
-    today_weekday = date.today().strftime("%A").lower()
-    days = data["children"]["111_222"]["days"]
-    if today_weekday in days:
-        days[today_weekday]["date"] = today_str
-        days[today_weekday]["checkin"] = "08:00 - 16:00"
-
-    coordinator.data = data
     cal = _make_calendar(coordinator)
     ev = cal.event
 
-    if today_weekday in days and days[today_weekday].get("date") == today_str:
-        assert ev is not None
+    assert ev is not None
+    assert ev.start.date() == date(2026, 2, 9)
+
+
+async def test_calendar_event_property_none_outside_school_days(
+    hass: HomeAssistant, freezer
+):
+    """A day without data produces no current event."""
+    freezer.move_to("2026-02-14T10:00:00+00:00")
+
+    coordinator = MagicMock()
+    coordinator.data = _make_coordinator_data()
+
+    assert _make_calendar(coordinator).event is None
 
 
 # -------------------------------------------------------------------
@@ -169,8 +181,8 @@ async def test_calendar_async_get_events_filters_range(hass: HomeAssistant):
 
     cal = _make_calendar(coordinator)
 
-    start = datetime(2026, 2, 9)
-    end = datetime(2026, 2, 10)
+    start = datetime(2026, 2, 9, tzinfo=dt_util.DEFAULT_TIME_ZONE)
+    end = datetime(2026, 2, 10, tzinfo=dt_util.DEFAULT_TIME_ZONE)
 
     events = await cal.async_get_events(hass, start, end)
     for e in events:
@@ -186,8 +198,8 @@ async def test_calendar_async_get_events_full_week(hass: HomeAssistant):
 
     cal = _make_calendar(coordinator)
 
-    start = datetime(2026, 2, 9)
-    end = datetime(2026, 2, 14)
+    start = datetime(2026, 2, 9, tzinfo=dt_util.DEFAULT_TIME_ZONE)
+    end = datetime(2026, 2, 14, tzinfo=dt_util.DEFAULT_TIME_ZONE)
 
     events = await cal.async_get_events(hass, start, end)
     assert len(events) >= 2
@@ -197,16 +209,13 @@ async def test_calendar_async_get_events_full_week(hass: HomeAssistant):
 # extra_state_attributes
 # -------------------------------------------------------------------
 
-async def test_calendar_extra_state_attributes_today(hass: HomeAssistant):
+async def test_calendar_extra_state_attributes_today(hass: HomeAssistant, freezer):
     """Calendar entity exposes today's day data as attributes when today has data."""
+    freezer.move_to("2026-02-09T18:30:00+00:00")
+
     coordinator = MagicMock()
-    data = _make_coordinator_data()
+    coordinator.data = _make_coordinator_data()
 
-    # Force Monday to be today
-    today_str = date.today().isoformat()
-    data["children"]["111_222"]["days"]["monday"]["date"] = today_str
-
-    coordinator.data = data
     cal = _make_calendar(coordinator)
     attrs = cal.extra_state_attributes
 
@@ -217,39 +226,41 @@ async def test_calendar_extra_state_attributes_today(hass: HomeAssistant):
     assert "Cereal" in attrs["breakfast_items"]
     assert "breakfast_percent" in attrs
     assert attrs["breakfast_percent"] == 80
-    assert attrs["date"] == today_str
+    assert attrs["date"] == MONDAY
 
 
-async def test_calendar_extra_state_attributes_falls_back_to_latest(hass: HomeAssistant):
-    """When today is not in the data, attributes show the most recent school day."""
+async def test_calendar_extra_state_attributes_falls_back_to_latest(
+    hass: HomeAssistant, freezer
+):
+    """When today has no data, attributes show the most recent school day."""
+    freezer.move_to("2026-02-13T12:00:00+00:00")
+
     coordinator = MagicMock()
-    data = _make_coordinator_data()
-    # All dates are 2026-02-09..13 (in the past) — none match today
-    coordinator.data = data
+    coordinator.data = _make_coordinator_data()
     cal = _make_calendar(coordinator)
     attrs = cal.extra_state_attributes
 
-    # Monday (2026-02-09) is the only day with real activity in MOCK_TIMELINE_RAW
-    assert attrs.get("date") == "2026-02-09"
-    assert "checkin" in attrs
+    # Monday is the only day with real activity in MOCK_TIMELINE_RAW
+    assert attrs.get("date") == MONDAY
     assert attrs["checkin"] == "08:15 - 16:30"
-    assert "breakfast_items" in attrs
     assert "Cereal" in attrs["breakfast_items"]
 
 
-async def test_calendar_extra_state_attributes_skips_empty_days(hass: HomeAssistant):
+async def test_calendar_extra_state_attributes_skips_empty_days(
+    hass: HomeAssistant, freezer
+):
     """Days with no checkin or meals are not returned as the latest day."""
+    freezer.move_to("2026-02-13T12:00:00+00:00")
+
     coordinator = MagicMock()
     data = _make_coordinator_data()
-    # Wipe Monday's activity
-    data["children"]["111_222"]["days"]["monday"]["checkin"] = "unknown"
-    data["children"]["111_222"]["days"]["monday"].pop("breakfast_items", None)
-    data["children"]["111_222"]["days"]["monday"].pop("lunch_items", None)
-    data["children"]["111_222"]["days"]["monday"].pop("snack_items", None)
+    monday = data["children"]["111_222"]["days"][MONDAY]
+    monday["checkin"] = "unknown"
+    for meal in ("breakfast", "lunch", "snack"):
+        monday.pop(f"{meal}_items", None)
     coordinator.data = data
-    cal = _make_calendar(coordinator)
-    # With all activity removed from the only data-rich day, attrs should be empty
-    assert cal.extra_state_attributes == {}
+
+    assert _make_calendar(coordinator).extra_state_attributes == {}
 
 
 # -------------------------------------------------------------------
@@ -263,7 +274,11 @@ async def test_calendar_no_data(hass: HomeAssistant):
 
     cal = _make_calendar(coordinator)
     assert cal.event is None
-    events = await cal.async_get_events(hass, datetime(2026, 2, 9), datetime(2026, 2, 14))
+    events = await cal.async_get_events(
+        hass,
+        datetime(2026, 2, 9, tzinfo=dt_util.DEFAULT_TIME_ZONE),
+        datetime(2026, 2, 14, tzinfo=dt_util.DEFAULT_TIME_ZONE),
+    )
     assert events == []
     assert cal.extra_state_attributes == {}
 
@@ -272,11 +287,11 @@ async def test_nap_event_not_created_without_times(hass: HomeAssistant):
     """When nap subtitle has only duration (no times), no nap event is created."""
     coordinator = MagicMock()
     data = _make_coordinator_data()
-    data["children"]["111_222"]["days"]["monday"]["nap"] = "1 h and 30 min"
+    data["children"]["111_222"]["days"][MONDAY]["nap"] = "1 h and 30 min"
     coordinator.data = data
 
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     nap_events = [e for e in events if e.summary == "Nap"]
     assert len(nap_events) == 0
@@ -286,7 +301,7 @@ async def test_nap_event_not_created_with_partial_times(hass: HomeAssistant):
     """When nap has a start time but no end time (API glitch), no nap event."""
     coordinator = MagicMock()
     data = _make_coordinator_data()
-    days = data["children"]["111_222"]["days"]["monday"]
+    monday = data["children"]["111_222"]["days"][MONDAY]
 
     partial_values = [
         "12:39 - ",
@@ -296,11 +311,11 @@ async def test_nap_event_not_created_with_partial_times(hass: HomeAssistant):
         " - 14:33",
     ]
     for nap_text in partial_values:
-        days["nap"] = nap_text
+        monday["nap"] = nap_text
         coordinator.data = data
 
         cal = _make_calendar(coordinator)
-        events = cal._build_events()
+        events = _week_events(cal)
 
         nap_events = [e for e in events if e.summary == "Nap"]
         assert len(nap_events) == 0, f"Nap event should not be created for: {nap_text!r}"
@@ -310,11 +325,11 @@ async def test_school_event_no_checkin_uses_fallback(hass: HomeAssistant):
     """School event without valid checkin time starts at 08:00 (fallback)."""
     coordinator = MagicMock()
     data = _make_coordinator_data()
-    data["children"]["111_222"]["days"]["monday"]["checkin"] = "unknown"
+    data["children"]["111_222"]["days"][MONDAY]["checkin"] = "unknown"
     coordinator.data = data
 
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     monday_school = [
         e for e in events
@@ -347,13 +362,14 @@ async def test_absent_day_has_no_school_event(hass: HomeAssistant):
     data = _make_coordinator_data()
 
     # Mark Monday as absent (but keep meal data — the menu is still published)
-    data["children"]["111_222"]["days"]["monday"]["absent"] = True
-    data["children"]["111_222"]["days"]["monday"]["checkin"] = "Absent"
-    data["children"]["111_222"]["days"]["monday"]["absence_reason"] = "vacation"
+    monday = data["children"]["111_222"]["days"][MONDAY]
+    monday["absent"] = True
+    monday["checkin"] = "Absent"
+    monday["absence_reason"] = "vacation"
 
     coordinator.data = data
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     monday_events = [
         e for e in events
@@ -367,12 +383,12 @@ async def test_absent_day_has_no_nap_event(hass: HomeAssistant):
     coordinator = MagicMock()
     data = _make_coordinator_data()
 
-    data["children"]["111_222"]["days"]["monday"]["absent"] = True
-    data["children"]["111_222"]["days"]["monday"]["checkin"] = "Absent"
+    data["children"]["111_222"]["days"][MONDAY]["absent"] = True
+    data["children"]["111_222"]["days"][MONDAY]["checkin"] = "Absent"
 
     coordinator.data = data
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     nap_events = [e for e in events if e.summary == "Nap"]
     assert len(nap_events) == 0, "No nap event for an absent day"
@@ -383,11 +399,11 @@ async def test_non_absent_day_still_has_school_event(hass: HomeAssistant):
     coordinator = MagicMock()
     data = _make_coordinator_data()
     # Ensure absent is not set
-    data["children"]["111_222"]["days"]["monday"].pop("absent", None)
+    data["children"]["111_222"]["days"][MONDAY].pop("absent", None)
 
     coordinator.data = data
     cal = _make_calendar(coordinator)
-    events = cal._build_events()
+    events = _week_events(cal)
 
     monday_school = [
         e for e in events

@@ -24,6 +24,7 @@ import logging
 from datetime import date as date_cls, timedelta
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,6 +34,9 @@ STORAGE_KEY_PREFIX = "kinderpedia_history"
 
 # Delay between API requests during backfill (seconds).
 BACKFILL_DELAY_SECONDS = 5
+
+# Weeks of history kept on disk (~2 school years); older weeks are dropped.
+MAX_HISTORY_WEEKS = 104
 
 
 def _monday_of(d: date_cls) -> date_cls:
@@ -79,7 +83,10 @@ class KinderpediaHistoryStore:
         self._loaded = True
 
     async def async_save(self) -> None:
-        """Persist current data to disk."""
+        """Persist current data to disk, dropping weeks past the retention limit."""
+        if len(self._weeks) > MAX_HISTORY_WEEKS:
+            keep = sorted(self._weeks, reverse=True)[:MAX_HISTORY_WEEKS]
+            self._weeks = {monday: self._weeks[monday] for monday in keep}
         self._all_days_cache = None
         await self._store.async_save({"weeks": self._weeks})
 
@@ -115,6 +122,16 @@ class KinderpediaHistoryStore:
         """Return True if the given week is already stored."""
         return monday_iso in self._weeks
 
+    def days_in_range(self, start: date_cls, end: date_cls) -> dict[str, dict]:
+        """Return stored days whose date falls within [start, end]."""
+        start_iso = start.isoformat()
+        end_iso = end.isoformat()
+        return {
+            date_iso: day
+            for date_iso, day in self.get_all_days().items()
+            if start_iso <= date_iso <= end_iso
+        }
+
     # ------------------------------------------------------------------
     # Backfill
     # ------------------------------------------------------------------
@@ -143,7 +160,7 @@ class KinderpediaHistoryStore:
             _LOGGER.debug("Backfill: fetching week offset %d for child %s_%s", offset, child_id, kg_id)
             try:
                 raw = await api.fetch_timeline(child_id, kg_id, week_offset=offset)
-            except Exception:
+            except HomeAssistantError:
                 _LOGGER.debug(
                     "Backfill: API error at week offset %d, stopping", offset,
                     exc_info=True,
@@ -183,12 +200,15 @@ class KinderpediaHistoryStore:
 
             self._weeks[monday_iso] = days
             stored_count += 1
-            await self.async_save()
             _LOGGER.debug("Backfill: stored week %s (offset %d, total %d)", monday_iso, offset, stored_count)
 
             offset -= 1
             if delay > 0:
                 await asyncio.sleep(delay)
+
+        # One write for the whole walk instead of one per week.
+        if stored_count:
+            await self.async_save()
 
         _LOGGER.debug("Backfill complete for %s_%s: %d new weeks stored", child_id, kg_id, stored_count)
         return stored_count
@@ -209,7 +229,7 @@ class KinderpediaHistoryStore:
 
         try:
             raw = await api.fetch_timeline(child_id, kg_id, week_offset=-1)
-        except Exception:
+        except HomeAssistantError:
             _LOGGER.debug("Weekly archive: API error fetching last week")
             return False
 

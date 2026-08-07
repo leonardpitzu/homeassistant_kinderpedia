@@ -1,165 +1,170 @@
+"""Data update coordinator and payload parsing for Kinderpedia."""
+
+from __future__ import annotations
+
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from datetime import date as date_cls, timedelta
+from typing import Any
 
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import utcnow
 
-from .api import KinderpediaAPI
+from .api import KinderpediaAPI, KinderpediaAuthError
+from .const import UPDATE_INTERVAL_MINUTES, WEEKDAY_NAMES
+from .history import KinderpediaHistoryStore
 
 _LOGGER = logging.getLogger(__name__)
 
 _FOOD_TYPE_MAP = {"md": "breakfast", "mp": "lunch", "mp2": "lunch", "g": "snack"}
+_LUNCH_TYPES = ("mp", "mp2")
 _NAP_PATTERN = re.compile(r"\s*(\d+)\s*h\s*and\s*(\d+)\s*min")
 _NAP_PATTERN_MIN = re.compile(r"\s*(\d+)\s*min")
-_WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
-def _parse_timeline(json_data):
-    """Parse raw timeline JSON into a weekday-keyed dict of day data."""
-    parsed = {}
+def _parse_timeline(json_data: Any) -> dict[str, dict]:
+    """Parse raw timeline JSON into a dict of day data keyed by ISO date."""
+    parsed: dict[str, dict] = {}
 
-    try:
-        days = {}
-        if isinstance(json_data, dict):
-            result = json_data.get("result")
-            if isinstance(result, dict):
-                dailytimeline = result.get("dailytimeline")
-                if isinstance(dailytimeline, dict):
-                    days = dailytimeline.get("days", {})
+    days = {}
+    if isinstance(json_data, dict):
+        result = json_data.get("result")
+        if isinstance(result, dict):
+            dailytimeline = result.get("dailytimeline")
+            if isinstance(dailytimeline, dict):
+                days = dailytimeline.get("days", {}) or {}
 
-        for date_key, day_data in sorted(days.items()):
-            day_data = day_data or {}
+    for date_key, day_data in sorted(days.items()):
+        try:
+            weekday = WEEKDAY_NAMES[date_cls.fromisoformat(date_key).weekday()]
+        except (ValueError, TypeError):
+            continue
 
-            # Derive weekday name from the date string
-            try:
-                parsed_date = date_cls.fromisoformat(date_key)
-                weekday = _WEEKDAY_NAMES[parsed_date.weekday()]
-            except (ValueError, TypeError):
-                continue
+        day_entry = {
+            "name": weekday,
+            "date": date_key,
+            "checkin": "unknown",
+            "nap": "unknown",
+        }
 
-            day_entry = {
-                "name": weekday,
-                "date": date_key,
-                "checkin": "unknown",
-                "nap": "unknown"
-            }
+        for item in (day_data or {}).get("data", []) or []:
+            item_id = item.get("id", "")
+            if item_id == "checkin":
+                _parse_checkin(item, day_entry)
+            elif item_id == "nap":
+                _parse_nap(item, day_entry)
+            elif item_id.startswith("food_"):
+                _parse_food(item, day_entry)
 
-            for item in day_data.get("data", []) or []:
-                item_id = item.get("id", "")
-                if item_id == "checkin":
-                    day_entry["checkin"] = item.get("subtitle", "unknown")
-                    # Detect absence from presence details
-                    details = item.get("details")
-                    if isinstance(details, dict):
-                        presence = details.get("presence")
-                        if isinstance(presence, dict):
-                            absence = presence.get("absence")
-                            if isinstance(absence, dict):
-                                day_entry["absent"] = True
-                                day_entry["absence_reason"] = absence.get("reason", "")
-                                day_entry["absence_motivated"] = absence.get("motivated", False)
-                                day_entry["absence_by"] = absence.get("by", "")
-                elif item_id == "nap":
-                    day_entry["nap"] = item.get("subtitle", "unknown")
-                    if day_entry["nap"] != "unknown":
-                        match = _NAP_PATTERN.search(day_entry["nap"])
-                        if match:
-                            hours = int(match.group(1))
-                            minutes = int(match.group(2))
-                            day_entry["nap_duration"] = hours * 60 + minutes
-                        else:
-                            match_min = _NAP_PATTERN_MIN.search(day_entry["nap"])
-                            if match_min:
-                                day_entry["nap_duration"] = int(match_min.group(1))
-                            else:
-                                day_entry["nap_duration"] = 0
-                elif item_id.startswith("food_"):
-                    details = item.get("details")
-                    if isinstance(details, dict):
-                        food = details.get("food") or {}
-                        meals = food.get("meals", []) or []
-
-                        lunch_percents = []
-
-                        for meal in meals:
-                            food_type = _FOOD_TYPE_MAP.get(meal.get("type", "unknown"), meal.get("type", "unknown"))
-                            percent = meal.get("percent")
-                            if meal.get("type") in ["mp", "mp2"] and isinstance(percent, (int, float)):
-                                lunch_percents.append(percent)
-
-                            menus = meal.get("menus", []) or []
-                            if menus:
-                                day_entry[f"{food_type}_items"] = [m.get("name", "unknown") for m in menus]
-                                totals = meal.get("totals", {}) or {}
-                                day_entry[f"{food_type}_kcal"] = totals.get("kcal", 0)
-                                day_entry[f"{food_type}_weight"] = totals.get("weight", 0)
-
-                            if meal.get("type") not in ["mp", "mp2"]:
-                                day_entry[f"{food_type}_percent"] = percent if percent is not None else 0
-                            else:
-                                if lunch_percents:
-                                    day_entry["lunch_percent"] = round(sum(lunch_percents) / len(lunch_percents), 1)
-                                else:
-                                    day_entry["lunch_percent"] = 0
-
-            parsed[weekday] = day_entry
-
-    except Exception as e:
-        _LOGGER.error("Error parsing kinderpedia timeline: %s", e)
+        parsed[date_key] = day_entry
 
     return parsed
 
 
-def _parse_newsfeed(json_data):
+def _parse_checkin(item: dict, day_entry: dict) -> None:
+    """Fill check-in and absence details into *day_entry*."""
+    day_entry["checkin"] = item.get("subtitle", "unknown")
+
+    details = item.get("details")
+    presence = details.get("presence") if isinstance(details, dict) else None
+    absence = presence.get("absence") if isinstance(presence, dict) else None
+    if not isinstance(absence, dict):
+        return
+
+    day_entry["absent"] = True
+    day_entry["absence_reason"] = absence.get("reason", "")
+    day_entry["absence_motivated"] = absence.get("motivated", False)
+    day_entry["absence_by"] = absence.get("by", "")
+
+
+def _parse_nap(item: dict, day_entry: dict) -> None:
+    """Fill nap text and duration in minutes into *day_entry*."""
+    nap = item.get("subtitle", "unknown")
+    day_entry["nap"] = nap
+    if not nap or nap == "unknown":
+        return
+
+    if match := _NAP_PATTERN.search(nap):
+        day_entry["nap_duration"] = int(match.group(1)) * 60 + int(match.group(2))
+    elif match := _NAP_PATTERN_MIN.search(nap):
+        day_entry["nap_duration"] = int(match.group(1))
+    else:
+        day_entry["nap_duration"] = 0
+
+
+def _parse_food(item: dict, day_entry: dict) -> None:
+    """Fill meal menus, totals and eaten percentages into *day_entry*.
+
+    Lunch can arrive as two courses (``mp`` + ``mp2``); those are averaged.
+    """
+    details = item.get("details")
+    if not isinstance(details, dict):
+        return
+
+    meals = (details.get("food") or {}).get("meals", []) or []
+    lunch_percents: list[float] = []
+
+    for meal in meals:
+        raw_type = meal.get("type", "unknown")
+        food_type = _FOOD_TYPE_MAP.get(raw_type, raw_type)
+        percent = meal.get("percent")
+
+        if menus := (meal.get("menus") or []):
+            day_entry[f"{food_type}_items"] = [m.get("name", "unknown") for m in menus]
+            totals = meal.get("totals") or {}
+            day_entry[f"{food_type}_kcal"] = totals.get("kcal", 0)
+            day_entry[f"{food_type}_weight"] = totals.get("weight", 0)
+
+        if raw_type in _LUNCH_TYPES:
+            if isinstance(percent, (int, float)):
+                lunch_percents.append(percent)
+            day_entry["lunch_percent"] = (
+                round(sum(lunch_percents) / len(lunch_percents), 1) if lunch_percents else 0
+            )
+        else:
+            day_entry[f"{food_type}_percent"] = percent if percent is not None else 0
+
+
+def _parse_newsfeed(json_data: Any) -> list[dict]:
     """Parse raw newsfeed JSON into a list of text-friendly feed items."""
-    items = []
-    try:
-        if not isinstance(json_data, dict):
-            return items
+    items: list[dict] = []
 
-        result = json_data.get("result")
-        if not isinstance(result, dict):
-            return items
+    result = json_data.get("result") if isinstance(json_data, dict) else None
+    feed = result.get("feed") if isinstance(result, dict) else None
+    if not isinstance(feed, list):
+        return items
 
-        feed = result.get("feed")
-        if not isinstance(feed, list):
-            return items
+    for entry in feed:
+        item_type = entry.get("type", "unknown")
 
-        for entry in feed:
-            item_type = entry.get("type", "unknown")
+        # Skip gallery items – they add noise and no actionable info
+        if item_type == "gallery":
+            continue
 
-            # Skip gallery items – they add noise and no actionable info
-            if item_type == "gallery":
-                continue
+        content = entry.get("content") or {}
+        user = entry.get("user") or {}
+        author = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
 
-            content = entry.get("content") or {}
-            user = entry.get("user") or {}
-            author = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+        title = content.get("title") or ""
+        description = content.get("description") or ""
 
-            title = content.get("title") or ""
-            description = content.get("description") or ""
-
-            # Build a human-readable summary based on type
-            summary = _build_summary(item_type, title, content, author)
-
-            items.append({
-                "id": entry.get("id"),
-                "summary": summary,
-                "title": title,
-                "description": description[:500] if description else "",
-                "date": entry.get("date_friendly", ""),
-            })
-
-    except Exception as e:
-        _LOGGER.error("Error parsing kinderpedia newsfeed: %s", e)
+        items.append({
+            "id": entry.get("id"),
+            "summary": _build_summary(item_type, title, content, author),
+            "title": title,
+            "description": description[:500] if description else "",
+            "date": entry.get("date_friendly", ""),
+        })
 
     return items
 
 
-def _build_summary(item_type, title, content, author):
+def _build_summary(item_type: str, title: str, content: dict, author: str) -> str:
     """Build a short human-readable summary for a feed item."""
     if item_type == "invoice":
         due = content.get("subtitle1", "")
@@ -183,28 +188,29 @@ def _build_summary(item_type, title, content, author):
     return f"New post from {author}"
 
 
-class KinderpediaDataUpdateCoordinator(DataUpdateCoordinator):
+class KinderpediaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Poll the Kinderpedia API for every child on the account."""
+
     def __init__(
         self,
         hass: HomeAssistant,
         api: KinderpediaAPI,
-        history_stores: dict | None = None,
         initial_children: list | None = None,
+        config_entry: ConfigEntry | None = None,
     ) -> None:
         self.api = api
-        # {child_key: KinderpediaHistoryStore}
-        self._history_stores: dict = history_stores or {}
         # Children already fetched during setup; consumed on the first refresh
         # to avoid a duplicate fetch_children round-trip at startup.
         self._initial_children: list | None = initial_children
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name="Kinderpedia Coordinator",
-            update_interval=timedelta(minutes=15),
+            update_interval=timedelta(minutes=UPDATE_INTERVAL_MINUTES),
         )
 
-    async def _async_update_data(self):
+    async def _async_update_data(self) -> dict[str, Any]:
         """Fetch all children and their timelines, return parsed data."""
         _LOGGER.debug("Fetching data from Kinderpedia API")
         try:
@@ -216,25 +222,22 @@ class KinderpediaDataUpdateCoordinator(DataUpdateCoordinator):
             else:
                 children = await self.api.fetch_children()
 
-            result = {
-                "children": {},
-                "last_updated": utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-
-            # Fetch every child's timeline + newsfeed concurrently.
             child_results = await asyncio.gather(
                 *(self._fetch_child(child) for child in children)
             )
-            for key, entry in child_results:
-                result["children"][key] = entry
-
-            _LOGGER.debug("Kinderpedia data successfully fetched for %d children", len(children))
-            return result
+        except KinderpediaAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
         except Exception as err:
             _LOGGER.error("Failed to fetch Kinderpedia data: %s", err)
             raise UpdateFailed(f"Error fetching data: {err}") from err
 
-    async def _fetch_child(self, child):
+        _LOGGER.debug("Kinderpedia data successfully fetched for %d children", len(children))
+        return {
+            "children": dict(child_results),
+            "last_updated": utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    async def _fetch_child(self, child: dict) -> tuple[str, dict]:
         """Fetch and parse one child's timeline + newsfeed concurrently."""
         child_id = child["child_id"]
         kg_id = child["kindergarten_id"]
@@ -247,28 +250,20 @@ class KinderpediaDataUpdateCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Kinderpedia: Raw timeline for %s: %s", key, timeline_raw)
         _LOGGER.debug("Kinderpedia: Raw newsfeed for %s: %s", key, newsfeed_raw)
 
-        parsed_days = _parse_timeline(timeline_raw)
-        parsed_feed = _parse_newsfeed(newsfeed_raw)
-
-        entry = {
+        return key, {
             "child": child,
-            "days": parsed_days,
-            "newsfeed": parsed_feed,
+            "days": _parse_timeline(timeline_raw),
+            "newsfeed": _parse_newsfeed(newsfeed_raw),
         }
 
-        # Merge historical weeks underneath current-week data.  Historical days
-        # use their date string as key; current-week days use weekday names.
-        # All days end up keyed by date so the calendar can iterate uniformly.
-        history_store = self._history_stores.get(key)
-        if history_store is not None:
-            historical_days = history_store.get_all_days()
-            # Current week takes precedence – never overwrite live data
-            current_dates = {
-                d.get("date") for d in parsed_days.values() if d.get("date")
-            }
-            for date_iso, day_entry in historical_days.items():
-                if date_iso not in current_dates:
-                    # Use date_iso as key to avoid weekday name collisions
-                    parsed_days[date_iso] = day_entry
 
-        return key, entry
+@dataclass
+class KinderpediaRuntimeData:
+    """Everything a config entry owns at runtime."""
+
+    api: KinderpediaAPI
+    coordinator: KinderpediaDataUpdateCoordinator
+    history_stores: dict[str, KinderpediaHistoryStore]
+
+
+type KinderpediaConfigEntry = ConfigEntry[KinderpediaRuntimeData]

@@ -1,6 +1,11 @@
 """Tests for the Kinderpedia coordinator and timeline parser."""
 
-from custom_components.kinderpedia.coordinator import _parse_timeline
+from custom_components.kinderpedia.coordinator import _parse_timeline as _parse_by_date
+
+
+def _parse_timeline(raw):
+    """Parse and re-key by weekday name so assertions stay readable."""
+    return {day["name"]: day for day in _parse_by_date(raw).values()}
 
 
 def _make_week(monday_data, extra_days=None):
@@ -69,6 +74,15 @@ class TestParseTimeline:
             assert day in result
         assert result["saturday"]["date"] == "2026-02-14"
         assert result["sunday"]["date"] == "2026-02-15"
+
+    def test_days_are_keyed_by_iso_date(self):
+        """The parser keys days by ISO date, with the weekday kept as a field."""
+        parsed = _parse_by_date(_make_week({"data": []}))
+
+        assert set(parsed) == {
+            f"2026-02-{day:02d}" for day in range(9, 16)
+        }
+        assert parsed["2026-02-09"]["name"] == "monday"
 
     def test_empty_days(self):
         """Test that empty day data returns defaults."""

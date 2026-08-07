@@ -37,7 +37,7 @@ async def test_successful_config_flow(hass: HomeAssistant):
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Kinderpedia"
+    assert result["title"] == MOCK_EMAIL
     assert result["data"][CONF_EMAIL] == MOCK_EMAIL
     assert result["data"][CONF_PASSWORD] == MOCK_PASSWORD
 
@@ -95,7 +95,48 @@ async def test_generic_exception(hass: HomeAssistant):
         )
 
     assert result["type"] == FlowResultType.FORM
-    assert result["errors"] == {"base": "cannot_connect"}
+    assert result["errors"] == {"base": "unknown"}
+
+
+async def test_reauth_flow_updates_password(hass: HomeAssistant, mock_config_entry):
+    """Reauth replaces the stored password without creating a new entry."""
+    result = await mock_config_entry.start_reauth_flow(hass)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+
+    with patch(
+        "custom_components.kinderpedia.config_flow.KinderpediaAPI"
+    ) as mock_api_cls:
+        mock_api_cls.return_value.fetch_children = AsyncMock(return_value=[MOCK_CHILD])
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_PASSWORD: "new-password"}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert mock_config_entry.data[CONF_PASSWORD] == "new-password"
+
+
+async def test_reauth_flow_rejects_bad_password(hass: HomeAssistant, mock_config_entry):
+    """Reauth keeps asking while the new password is refused."""
+    result = await mock_config_entry.start_reauth_flow(hass)
+
+    with patch(
+        "custom_components.kinderpedia.config_flow.KinderpediaAPI"
+    ) as mock_api_cls:
+        mock_api_cls.return_value.fetch_children = AsyncMock(
+            side_effect=KinderpediaAuthError("nope")
+        )
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_PASSWORD: "still-wrong"}
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_auth"}
+    assert mock_config_entry.data[CONF_PASSWORD] == MOCK_PASSWORD
 
 
 async def test_no_children_found(hass: HomeAssistant):
