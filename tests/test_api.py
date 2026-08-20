@@ -58,6 +58,31 @@ class TestLogin:
             await api.login()
 
     @pytest.mark.asyncio
+    async def test_login_null_body(self):
+        """A 200 with a `null` JSON body must not raise AttributeError."""
+        hass = MagicMock()
+        api, session = _make_api(hass)
+
+        resp = _make_response(200, None)
+        session.post = MagicMock(return_value=_async_ctx(resp))
+
+        with pytest.raises(KinderpediaAuthError):
+            await api.login()
+
+    @pytest.mark.asyncio
+    async def test_login_null_expire_at(self):
+        """A null expire_at must not blow up datetime.fromtimestamp."""
+        hass = MagicMock()
+        api, session = _make_api(hass)
+
+        resp = _make_response(200, {"token": "fake-jwt-token", "expire_at": None})
+        session.post = MagicMock(return_value=_async_ctx(resp))
+
+        await api.login()
+
+        assert api.token == "fake-jwt-token"
+
+    @pytest.mark.asyncio
     async def test_login_connection_failure(self):
         hass = MagicMock()
         api, session = _make_api(hass)
@@ -142,6 +167,38 @@ class TestFetchChildren:
 
         children = await api.fetch_children()
         assert children == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_children_tolerates_malformed_entries(self):
+        """Null/!dict accounts and children, and missing ids, must be skipped."""
+        hass = MagicMock()
+        api, session = _make_api(hass)
+
+        malformed_response = {
+            "result": {
+                "available_accounts": [
+                    None,
+                    "garbage",
+                    {"status": "active"},  # no child_id / kindergarten_id
+                    {"child_id": 999, "kindergarten_id": 222, "status": "active"},  # no matching child
+                    {"child_id": 111, "status": "active"},  # no kindergarten_id
+                    {"child_id": 111, "kindergarten_id": 222, "status": "active"},
+                ],
+                "children": [None, "garbage", {"first_name": "NoId"}, {"id": 111, "first_name": "Alice"}],
+            }
+        }
+
+        login_resp = _make_response(200, MOCK_LOGIN_RESPONSE)
+        core_resp = _make_response(200, malformed_response)
+        session.post = MagicMock(return_value=_async_ctx(login_resp))
+        session.get = MagicMock(return_value=_async_ctx(core_resp))
+
+        children = await api.fetch_children()
+
+        assert len(children) == 1
+        assert children[0]["child_id"] == 111
+        assert children[0]["kindergarten_id"] == 222
+        assert children[0]["first_name"] == "Alice"
 
 
 class TestFetchTimeline:

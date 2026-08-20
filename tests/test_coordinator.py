@@ -177,6 +177,40 @@ class TestParseTimeline:
         result = _parse_timeline(raw)
         assert result["monday"]["checkin"] == "unknown"
 
+    def test_null_timeline_items_skipped(self):
+        """Null / non-dict entries in a day's data list must be skipped."""
+        raw = _make_week({
+            "data": [None, "garbage", {"id": "checkin", "subtitle": "08:15 - 16:30"}]
+        })
+        result = _parse_timeline(raw)
+        assert result["monday"]["checkin"] == "08:15 - 16:30"
+
+    def test_null_meal_and_menu_entries_skipped(self):
+        """Null meals and null menu items must not break food parsing."""
+        raw = _make_week({
+            "data": [
+                {
+                    "id": "food_1",
+                    "details": {
+                        "food": {
+                            "meals": [
+                                None,
+                                {
+                                    "type": "md",
+                                    "percent": 80,
+                                    "menus": [None, {"name": "Cereal"}],
+                                    "totals": {"kcal": 200, "weight": 150},
+                                },
+                            ]
+                        }
+                    },
+                }
+            ]
+        })
+        result = _parse_timeline(raw)
+        assert result["monday"]["breakfast_items"] == ["Cereal"]
+        assert result["monday"]["breakfast_percent"] == 80
+
     def test_nap_unparseable_format(self):
         """Test nap with an unrecognised format gets duration 0."""
         raw = _make_week({

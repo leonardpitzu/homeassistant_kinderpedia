@@ -79,8 +79,11 @@ class KinderpediaAPI:
 
         _LOGGER.debug("Login response: %s", data)
 
+        if not isinstance(data, dict):
+            raise KinderpediaAuthError("Login failed: malformed response")
+
         self.token = data.get("token")
-        self.token_expiry = datetime.fromtimestamp(data.get("expire_at", 0), tz=UTC)
+        self.token_expiry = datetime.fromtimestamp(data.get("expire_at") or 0, tz=UTC)
 
         if not self.token:
             raise KinderpediaAuthError("Login failed: missing token")
@@ -146,20 +149,22 @@ class KinderpediaAPI:
         accounts = result_data.get("available_accounts", []) or []
         children = result_data.get("children", []) or []
 
-        child_lookup = {c["id"]: c for c in children}
+        child_lookup = {c["id"]: c for c in children if isinstance(c, dict) and "id" in c}
         enriched: list[dict[str, Any]] = []
 
         for acc in accounts:
-            if acc.get("status") != "active":
+            if not isinstance(acc, dict) or acc.get("status") != "active":
                 continue
 
-            child = child_lookup.get(acc["child_id"])
-            if not child:
+            child_id = acc.get("child_id")
+            kg_id = acc.get("kindergarten_id")
+            child = child_lookup.get(child_id)
+            if not child or kg_id is None:
                 continue
 
             enriched.append({
-                "child_id": acc["child_id"],
-                "kindergarten_id": acc["kindergarten_id"],
+                "child_id": child_id,
+                "kindergarten_id": kg_id,
                 "kindergarten_name": acc.get("kindergarten_name", "Unknown"),
                 "avatar": acc.get("avatar"),
                 "first_name": child.get("first_name", "Unknown"),

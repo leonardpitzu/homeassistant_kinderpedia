@@ -82,6 +82,13 @@ class TestParseNewsfeed:
     def test_parse_empty_feed(self):
         assert _parse_newsfeed({"result": {"feed": []}}) == []
 
+    def test_parse_null_feed_entries_skipped(self):
+        """Null / non-dict feed entries must be skipped, not crash."""
+        data = {"result": {"feed": [None, "garbage", {"id": 1, "type": "text", "content": {"title": "Hi"}}]}}
+        items = _parse_newsfeed(data)
+        assert len(items) == 1
+        assert items[0]["title"] == "Hi"
+
     def test_no_image_or_video_fields(self):
         """Parsed items must not contain image/video URL fields."""
         items = _parse_newsfeed(MOCK_NEWSFEED_RAW)

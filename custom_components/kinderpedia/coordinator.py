@@ -15,7 +15,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import utcnow
 
-from .api import KinderpediaAPI, KinderpediaAuthError
+from .api import KinderpediaAPI, KinderpediaAuthError, KinderpediaConnectionError
 from .const import UPDATE_INTERVAL_MINUTES, WEEKDAY_NAMES
 from .history import KinderpediaHistoryStore
 
@@ -52,7 +52,10 @@ def _parse_timeline(json_data: Any) -> dict[str, dict]:
             "nap": "unknown",
         }
 
-        for item in (day_data or {}).get("data", []) or []:
+        items = day_data.get("data") if isinstance(day_data, dict) else None
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
             item_id = item.get("id", "")
             if item_id == "checkin":
                 _parse_checkin(item, day_entry)
@@ -110,12 +113,14 @@ def _parse_food(item: dict, day_entry: dict) -> None:
     lunch_percents: list[float] = []
 
     for meal in meals:
+        if not isinstance(meal, dict):
+            continue
         raw_type = meal.get("type", "unknown")
         food_type = _FOOD_TYPE_MAP.get(raw_type, raw_type)
         percent = meal.get("percent")
 
         if menus := (meal.get("menus") or []):
-            day_entry[f"{food_type}_items"] = [m.get("name", "unknown") for m in menus]
+            day_entry[f"{food_type}_items"] = [m.get("name", "unknown") for m in menus if isinstance(m, dict)]
             totals = meal.get("totals") or {}
             day_entry[f"{food_type}_kcal"] = totals.get("kcal", 0)
             day_entry[f"{food_type}_weight"] = totals.get("weight", 0)
@@ -140,6 +145,8 @@ def _parse_newsfeed(json_data: Any) -> list[dict]:
         return items
 
     for entry in feed:
+        if not isinstance(entry, dict):
+            continue
         item_type = entry.get("type", "unknown")
 
         # Skip gallery items – they add noise and no actionable info
@@ -227,8 +234,11 @@ class KinderpediaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         except KinderpediaAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
+        except KinderpediaConnectionError as err:
+            raise UpdateFailed(f"Error fetching data: {err}") from err
         except Exception as err:
-            _LOGGER.error("Failed to fetch Kinderpedia data: %s", err)
+            # Anything else is a bug in the parsing/shape assumptions — keep the traceback.
+            _LOGGER.exception("Unexpected error fetching Kinderpedia data")
             raise UpdateFailed(f"Error fetching data: {err}") from err
 
         _LOGGER.debug("Kinderpedia data successfully fetched for %d children", len(children))
