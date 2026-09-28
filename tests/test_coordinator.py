@@ -108,6 +108,23 @@ class TestParseTimeline:
         result = _parse_timeline(raw)
         assert result["monday"]["nap_duration"] == 45
 
+    def test_nap_whole_hours(self):
+        """A whole-hour nap comes without a minutes part (live 2026-09-28)."""
+        raw = _make_week({
+            "data": [{"id": "nap", "subtitle": "13:29 - 14:29, 1 h"}]
+        })
+        result = _parse_timeline(raw)
+        assert result["monday"]["nap_duration"] == 60
+
+    def test_nap_in_progress_has_no_duration(self):
+        """A nap with a start but no end yet has no duration, not zero."""
+        raw = _make_week({
+            "data": [{"id": "nap", "subtitle": "12:39 - "}]
+        })
+        result = _parse_timeline(raw)
+        assert result["monday"]["nap"] == "12:39 - "
+        assert "nap_duration" not in result["monday"]
+
     def test_lunch_percent_averages_mp_and_mp2(self):
         """Test that mp and mp2 percentages are averaged for lunch."""
         raw = _make_week({
@@ -212,12 +229,12 @@ class TestParseTimeline:
         assert result["monday"]["breakfast_percent"] == 80
 
     def test_nap_unparseable_format(self):
-        """Test nap with an unrecognised format gets duration 0."""
+        """An unrecognised nap format leaves the duration absent, not zero."""
         raw = _make_week({
             "data": [{"id": "nap", "subtitle": "a long while"}]
         })
         result = _parse_timeline(raw)
-        assert result["monday"]["nap_duration"] == 0
+        assert "nap_duration" not in result["monday"]
 
     def test_weekday_derived_from_date(self):
         """Weekday key is derived from the actual date, not position."""

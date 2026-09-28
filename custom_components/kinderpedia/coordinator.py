@@ -23,8 +23,9 @@ _LOGGER = logging.getLogger(__name__)
 
 _FOOD_TYPE_MAP = {"md": "breakfast", "mp": "lunch", "mp2": "lunch", "g": "snack"}
 _LUNCH_TYPES = ("mp", "mp2")
-_NAP_PATTERN = re.compile(r"\s*(\d+)\s*h\s*and\s*(\d+)\s*min")
-_NAP_PATTERN_MIN = re.compile(r"\s*(\d+)\s*min")
+# Kinderpedia omits the zero part: "1 h", "45 min", "1 h and 30 min".
+_NAP_HOURS = re.compile(r"(\d+)\s*h\b")
+_NAP_MINUTES = re.compile(r"(\d+)\s*min")
 
 
 def _parse_timeline(json_data: Any) -> dict[str, dict]:
@@ -92,12 +93,10 @@ def _parse_nap(item: dict, day_entry: dict) -> None:
     if not nap or nap == "unknown":
         return
 
-    if match := _NAP_PATTERN.search(nap):
-        day_entry["nap_duration"] = int(match.group(1)) * 60 + int(match.group(2))
-    elif match := _NAP_PATTERN_MIN.search(nap):
-        day_entry["nap_duration"] = int(match.group(1))
-    else:
-        day_entry["nap_duration"] = 0
+    hours = _NAP_HOURS.search(nap)
+    minutes = _NAP_MINUTES.search(nap)
+    if hours or minutes:
+        day_entry["nap_duration"] = (int(hours[1]) * 60 if hours else 0) + (int(minutes[1]) if minutes else 0)
 
 
 def _parse_food(item: dict, day_entry: dict) -> None:
